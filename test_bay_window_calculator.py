@@ -22,6 +22,7 @@ from bay_window_calculator_with_svg import (
     calculate_outside_corner_to_corner_width,
     calculate_projection_from_side_faces,
     calculate_single_window_face,
+    calculate_wall_overlap,
     calculate_wall_parallel_span,
     candidate_to_dict,
     filter_stock_by_height,
@@ -1515,3 +1516,279 @@ class TestIntegration:
         layout = render_candidate_svg(top, frame_body_depth=c.frame_body_depth)
         assert layout.width > 0
         assert layout.height > 0
+
+
+# ---------------------------------------------------------------------------
+# calculate_wall_overlap – pure function
+# ---------------------------------------------------------------------------
+
+class TestCalculateWallOverlap:
+    def test_zero_when_span_equals_opening(self):
+        assert calculate_wall_overlap(72.0, 72.0) == pytest.approx(0.0)
+
+    def test_zero_when_span_narrower_than_opening(self):
+        assert calculate_wall_overlap(60.0, 72.0) == pytest.approx(0.0)
+
+    def test_positive_when_span_exceeds_opening(self):
+        # (80 - 72) / 2 = 4.0 per side
+        assert calculate_wall_overlap(80.0, 72.0) == pytest.approx(4.0)
+
+    def test_large_span_gives_large_overlap(self):
+        # (118.0 - 72.0) / 2 = 23.0
+        assert calculate_wall_overlap(118.0, 72.0) == pytest.approx(23.0)
+
+    def test_never_negative(self):
+        assert calculate_wall_overlap(30.0, 72.0) >= 0.0
+
+    def test_symmetric_formula(self):
+        # Doubling the excess doubles the overlap
+        o1 = calculate_wall_overlap(76.0, 72.0)   # excess = 4
+        o2 = calculate_wall_overlap(80.0, 72.0)   # excess = 8
+        assert o2 == pytest.approx(2.0 * o1)
+
+
+# ---------------------------------------------------------------------------
+# BayConstraints – max_wall_overlap field
+# ---------------------------------------------------------------------------
+
+class TestBayConstraintsMaxWallOverlap:
+    def test_default_is_none(self):
+        c = default_constraints()
+        assert c.max_wall_overlap is None
+
+    def test_can_be_set_to_float(self):
+        c = default_constraints(max_wall_overlap=6.0)
+        assert c.max_wall_overlap == pytest.approx(6.0)
+
+    def test_can_be_set_to_zero(self):
+        c = default_constraints(max_wall_overlap=0.0)
+        assert c.max_wall_overlap == pytest.approx(0.0)
+
+    def test_frozen_rejects_mutation(self):
+        c = default_constraints(max_wall_overlap=6.0)
+        with pytest.raises(Exception):
+            c.max_wall_overlap = 12.0
+
+    def test_different_max_overlap_makes_unequal_constraints(self):
+        c1 = default_constraints(max_wall_overlap=6.0)
+        c2 = default_constraints(max_wall_overlap=12.0)
+        assert c1 != c2
+
+
+# ---------------------------------------------------------------------------
+# BayCandidate – wall_overlap field
+# ---------------------------------------------------------------------------
+
+class TestBayCandidateHasWallOverlap:
+    def test_wall_overlap_field_present_on_found_candidate(self):
+        c = default_constraints()
+        stock = build_default_stock_windows(c.opening_height)
+        cand = find_candidates(c, stock)[0]
+        assert hasattr(cand, "wall_overlap")
+
+    def test_wall_overlap_is_non_negative_for_all_found(self):
+        c = default_constraints()
+        stock = build_default_stock_windows(c.opening_height)
+        for cand in find_candidates(c, stock)[:10]:
+            assert cand.wall_overlap >= 0.0
+
+    def test_wall_overlap_consistent_with_formula(self):
+        c = default_constraints()
+        stock = build_default_stock_windows(c.opening_height)
+        cand = find_candidates(c, stock)[0]
+        expected = calculate_wall_overlap(cand.wall_parallel_span, c.opening_width)
+        assert cand.wall_overlap == pytest.approx(expected)
+
+    def test_verify_candidate_sets_wall_overlap(self):
+        c = default_constraints()
+        cand = verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+        expected = calculate_wall_overlap(cand.wall_parallel_span, c.opening_width)
+        assert cand.wall_overlap == pytest.approx(expected)
+
+    def test_wall_overlap_positive_for_typical_default_layout(self):
+        # With default 72" opening and typical candidate, bay is always wider than opening
+        c = default_constraints()
+        stock = build_default_stock_windows(c.opening_height)
+        cand = find_candidates(c, stock)[0]
+        assert cand.wall_overlap > 0.0
+
+
+# ---------------------------------------------------------------------------
+# find_candidates – max_wall_overlap filtering
+# ---------------------------------------------------------------------------
+
+class TestFindCandidatesMaxWallOverlap:
+    def test_unconstrained_produces_candidates_with_positive_overlap(self):
+        c = default_constraints()
+        stock = build_default_stock_windows(c.opening_height)
+        candidates = find_candidates(c, stock)
+        assert any(cand.wall_overlap > 0.0 for cand in candidates)
+
+    def test_zero_max_overlap_excludes_all_default_candidates(self):
+        # With default constraints projection requires side faces wide enough
+        # that wall_parallel_span always exceeds opening_width=72.
+        c_zero = default_constraints(max_wall_overlap=0.0)
+        stock = build_default_stock_windows(c_zero.opening_height)
+        assert find_candidates(c_zero, stock) == []
+
+    def test_finite_limit_filters_correctly(self):
+        limit = 10.0
+        c = default_constraints(max_wall_overlap=limit)
+        stock = build_default_stock_windows(c.opening_height)
+        for cand in find_candidates(c, stock):
+            assert cand.wall_overlap <= limit + 1e-9
+
+    def test_tight_constraint_reduces_candidate_count(self):
+        c_no_limit = default_constraints()
+        c_tight = default_constraints(max_wall_overlap=5.0)
+        stock = build_default_stock_windows(c_no_limit.opening_height)
+        assert len(find_candidates(c_tight, stock)) <= len(find_candidates(c_no_limit, stock))
+
+    def test_very_large_limit_same_count_as_no_constraint(self):
+        c_none = default_constraints()
+        c_huge = default_constraints(max_wall_overlap=10_000.0)
+        stock = build_default_stock_windows(c_none.opening_height)
+        assert len(find_candidates(c_none, stock)) == len(find_candidates(c_huge, stock))
+
+    def test_all_returned_candidates_satisfy_constraint(self):
+        limit = 8.0
+        c = default_constraints(max_wall_overlap=limit)
+        stock = build_default_stock_windows(c.opening_height)
+        for cand in find_candidates(c, stock):
+            assert cand.wall_overlap <= limit + 1e-9
+
+
+# ---------------------------------------------------------------------------
+# verify_candidate – max_wall_overlap enforcement
+# ---------------------------------------------------------------------------
+
+class TestVerifyCandidateMaxWallOverlap:
+    # With default test geometry, side=30, center=30, count=2 gives wall_overlap ≈ 27.7".
+    # That exceeds any limit smaller than 27".
+
+    def test_raises_when_max_wall_overlap_exceeded(self):
+        c = default_constraints(max_wall_overlap=5.0)
+        with pytest.raises(ValueError, match="[Ww]all overlap"):
+            verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+
+    def test_does_not_raise_when_within_generous_limit(self):
+        c = default_constraints(max_wall_overlap=100.0)
+        cand = verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+        assert cand.wall_overlap <= 100.0
+
+    def test_does_not_raise_when_no_constraint_set(self):
+        c = default_constraints()
+        cand = verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+        assert cand.wall_overlap >= 0.0
+
+    def test_error_message_includes_actual_overlap(self):
+        c = default_constraints(max_wall_overlap=5.0)
+        with pytest.raises(ValueError) as exc_info:
+            verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+        # The error should mention "wall overlap" (case-insensitive)
+        assert "wall overlap" in str(exc_info.value).lower()
+
+    def test_boundary_at_exact_limit_is_acceptable(self):
+        # Calculate exact overlap for side=30, center=30, count=2 and set limit equal to it.
+        c_ref = default_constraints()
+        cand_ref = verify_candidate(c_ref, side_width=30.0, center_width=30.0, center_count=2)
+        exact_limit = cand_ref.wall_overlap
+        c_exact = default_constraints(max_wall_overlap=exact_limit)
+        cand = verify_candidate(c_exact, side_width=30.0, center_width=30.0, center_count=2)
+        assert cand.wall_overlap == pytest.approx(exact_limit)
+
+
+# ---------------------------------------------------------------------------
+# format_candidate – wall_overlap displayed
+# ---------------------------------------------------------------------------
+
+class TestFormatCandidateWallOverlap:
+    def _candidate(self):
+        c = default_constraints()
+        return verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+
+    def test_output_contains_wall_overlap_label(self):
+        text = format_candidate(self._candidate())
+        assert "wall overlap" in text.lower()
+
+    def test_wall_overlap_value_appears_in_output(self):
+        cand = self._candidate()
+        text = format_candidate(cand)
+        assert f"{cand.wall_overlap:.2f}" in text
+
+
+# ---------------------------------------------------------------------------
+# candidate_to_dict – wall_overlap in JSON
+# ---------------------------------------------------------------------------
+
+class TestCandidateToDictWallOverlap:
+    def _cand(self):
+        c = default_constraints()
+        return c, verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+
+    def test_wall_overlap_key_present(self):
+        _, cand = self._cand()
+        assert "wall_overlap" in candidate_to_dict(cand)
+
+    def test_wall_overlap_value_matches_candidate(self):
+        _, cand = self._cand()
+        d = candidate_to_dict(cand)
+        assert d["wall_overlap"] == pytest.approx(cand.wall_overlap)
+
+    def test_constraints_dict_includes_max_wall_overlap_when_set(self):
+        c = default_constraints(max_wall_overlap=100.0)  # large enough to pass verify
+        cand = verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+        d = candidate_to_dict(cand, constraints=c)
+        assert "max_wall_overlap" in d["constraints"]
+        assert d["constraints"]["max_wall_overlap"] == pytest.approx(100.0)
+
+    def test_constraints_dict_max_wall_overlap_is_none_when_unset(self):
+        c, cand = self._cand()
+        d = candidate_to_dict(cand, constraints=c)
+        assert d["constraints"]["max_wall_overlap"] is None
+
+    def test_wall_overlap_survives_json_round_trip(self):
+        _, cand = self._cand()
+        d = candidate_to_dict(cand)
+        d2 = json.loads(json.dumps(d))
+        assert d2["wall_overlap"] == pytest.approx(cand.wall_overlap)
+
+
+# ---------------------------------------------------------------------------
+# build_notes – wall_overlap note
+# ---------------------------------------------------------------------------
+
+class TestBuildNotesWallOverlap:
+    def _c(self):
+        return default_constraints()
+
+    def test_positive_overlap_generates_extension_note(self):
+        c = self._c()
+        w = WindowUnit(30.0, 36.0)
+        notes = build_notes(w, w, center_count=2,
+                            passage_overlap_fraction=0.85,
+                            constraints=c,
+                            wall_overlap=12.5)
+        combined = " ".join(notes).lower()
+        # Should mention how far it extends / overhangs
+        assert any(kw in combined for kw in ("beyond", "overhang", "extend", "overlap"))
+
+    def test_zero_overlap_generates_fits_within_note(self):
+        c = self._c()
+        w = WindowUnit(24.0, 36.0)
+        notes = build_notes(w, w, center_count=2,
+                            passage_overlap_fraction=0.80,
+                            constraints=c,
+                            wall_overlap=0.0)
+        combined = " ".join(notes).lower()
+        assert any(kw in combined for kw in ("within", "fits", "opening"))
+
+    def test_wall_overlap_note_contains_numeric_value_when_positive(self):
+        c = self._c()
+        w = WindowUnit(30.0, 36.0)
+        notes = build_notes(w, w, center_count=2,
+                            passage_overlap_fraction=0.85,
+                            constraints=c,
+                            wall_overlap=7.25)
+        combined = " ".join(notes)
+        assert "7.25" in combined

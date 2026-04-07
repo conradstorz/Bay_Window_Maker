@@ -59,6 +59,8 @@ class BayConstraints:
     :param min_unit_width: Minimum acceptable width for a single window unit.
     :param sill_height: Optional finished sill height above the floor in inches.
     :param frame_body_depth: Depth of the window frame body in inches. Used for SVG plan rendering.
+    :param max_wall_overlap: Maximum allowed per-side overhang of the bay beyond the masonry opening
+        in inches. ``None`` means no limit is enforced.
     """
 
     opening_width: float
@@ -76,6 +78,7 @@ class BayConstraints:
     min_unit_width: float = 18.0
     sill_height: float | None = None
     frame_body_depth: float = 4.0
+    max_wall_overlap: float | None = None
 
 
 @dataclass(frozen=True)
@@ -109,6 +112,7 @@ class BayCandidate:
     side_face_projection_contribution: float
     passage_overlap_width: float
     passage_overlap_fraction: float
+    wall_overlap: float
     score: float
     notes: tuple[str, ...]
 
@@ -292,12 +296,28 @@ def calculate_outside_corner_to_corner_width(center_face_width: float, side_face
     return center_face_width + (2.0 * side_face_width)
 
 
+def calculate_wall_overlap(wall_parallel_span: float, opening_width: float) -> float:
+    """Return the per-side overhang of the bay beyond the masonry opening.
+
+    A positive value means the bay frame extends beyond the masonry opening on each side,
+    resting on the masonry wall/pier. Zero means the bay fits entirely within the opening
+    width (or exactly at the edges).
+
+    :param wall_parallel_span: Total bay span parallel to the building wall in inches.
+    :param opening_width: Masonry opening width in inches.
+    :return: Per-side overlap in inches (always >= 0).
+    """
+
+    return max(0.0, (wall_parallel_span - opening_width) / 2.0)
+
+
 def build_notes(
     side_window: WindowUnit,
     center_window: WindowUnit,
     center_count: int,
     passage_overlap_fraction: float,
     constraints: BayConstraints,
+    wall_overlap: float = 0.0,
 ) -> tuple[str, ...]:
     """Create explanatory notes for a candidate."""
 
@@ -319,6 +339,13 @@ def build_notes(
         notes.append("Center face covers most of the masonry passage width.")
     elif passage_overlap_fraction >= constraints.min_passage_fraction:
         notes.append("Center face gives acceptable coverage of the masonry passage width.")
+
+    if wall_overlap > 0.0:
+        notes.append(
+            f"Bay extends {wall_overlap:.2f}\" beyond the masonry opening on each side."
+        )
+    else:
+        notes.append("Bay fits within the masonry opening width.")
 
     return tuple(notes)
 
@@ -449,6 +476,14 @@ def find_candidates(
                     center_face_width=center_face.finished_face_width,
                     side_face_width=side_face.finished_face_width,
                 )
+                wall_overlap = calculate_wall_overlap(wall_parallel_span, constraints.opening_width)
+
+                if (
+                    constraints.max_wall_overlap is not None
+                    and wall_overlap > constraints.max_wall_overlap
+                ):
+                    continue
+
                 score = score_candidate(
                     side_window=side_window,
                     center_window=center_window,
@@ -463,6 +498,7 @@ def find_candidates(
                     center_count=center_count,
                     passage_overlap_fraction=passage_overlap_fraction,
                     constraints=constraints,
+                    wall_overlap=wall_overlap,
                 )
 
                 candidates.append(
@@ -480,6 +516,7 @@ def find_candidates(
                         side_face_projection_contribution=actual_projection,
                         passage_overlap_width=passage_overlap_width,
                         passage_overlap_fraction=passage_overlap_fraction,
+                        wall_overlap=wall_overlap,
                         score=score,
                         notes=notes,
                     )
@@ -545,6 +582,14 @@ def verify_candidate(
         center_face_width=center_face.finished_face_width,
         side_face_width=side_face.finished_face_width,
     )
+    wall_overlap = calculate_wall_overlap(wall_parallel_span, constraints.opening_width)
+
+    if constraints.max_wall_overlap is not None and wall_overlap > constraints.max_wall_overlap:
+        raise ValueError(
+            f"Wall overlap of {wall_overlap:.2f}\" per side exceeds the maximum allowed "
+            f"{constraints.max_wall_overlap:.2f}\" per side."
+        )
+
     score = score_candidate(
         side_window=side_window,
         center_window=center_window,
@@ -559,6 +604,7 @@ def verify_candidate(
         center_count=center_count,
         passage_overlap_fraction=passage_overlap_fraction,
         constraints=constraints,
+        wall_overlap=wall_overlap,
     )
 
     return BayCandidate(
@@ -575,6 +621,7 @@ def verify_candidate(
         side_face_projection_contribution=actual_projection,
         passage_overlap_width=passage_overlap_width,
         passage_overlap_fraction=passage_overlap_fraction,
+        wall_overlap=wall_overlap,
         score=score,
         notes=notes,
     )
@@ -603,6 +650,7 @@ def format_candidate(candidate: BayCandidate, rank: int | None = None) -> str:
         f"  Outside corner-to-corner:   {candidate.outside_corner_to_corner_width:.2f}\""
     )
     lines.append(f"  Actual projection:          {candidate.projection_depth:.2f}\"")
+    lines.append(f"  Wall overlap per side:      {candidate.wall_overlap:.2f}\"")
     lines.append("")
     lines.append("Masonry opening relation")
     lines.append(f"  Passage overlap width:      {candidate.passage_overlap_width:.2f}\"")
@@ -851,6 +899,7 @@ def candidate_to_dict(
         "side_face_projection_contribution": candidate.side_face_projection_contribution,
         "passage_overlap_width": candidate.passage_overlap_width,
         "passage_overlap_fraction": candidate.passage_overlap_fraction,
+        "wall_overlap": candidate.wall_overlap,
         "score": candidate.score,
         "notes": list(candidate.notes),
     }
@@ -871,6 +920,7 @@ def candidate_to_dict(
             "min_passage_fraction": constraints.min_passage_fraction,
             "min_unit_width": constraints.min_unit_width,
             "max_single_unit_width": constraints.max_single_unit_width,
+            "max_wall_overlap": constraints.max_wall_overlap,
         }
     return data
 
@@ -1034,6 +1084,15 @@ def parse_args() -> argparse.Namespace:
         help="Depth of the window frame body in inches; used for SVG plan rendering. Default: 4.",
     )
     common.add_argument(
+        "--max-wall-overlap",
+        type=float,
+        default=None,
+        help=(
+            "Maximum allowed per-side bay overhang beyond the masonry opening in inches. "
+            "Default: no limit."
+        ),
+    )
+    common.add_argument(
         "--stock-json",
         type=Path,
         help="Optional JSON file containing stock window definitions.",
@@ -1099,6 +1158,7 @@ def build_constraints_from_args(args: argparse.Namespace) -> BayConstraints:
         min_unit_width=args.min_unit_width,
         sill_height=args.sill_height,
         frame_body_depth=args.frame_body_depth,
+        max_wall_overlap=args.max_wall_overlap,
     )
 
 
