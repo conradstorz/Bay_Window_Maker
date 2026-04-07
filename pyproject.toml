@@ -1,0 +1,18 @@
+[project]
+name = "bay-window-maker"
+version = "0.1.0"
+description = "Bay window layout calculator with SVG rendering"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+bay-window-calc = "bay_window_calculator_with_svg:main"
+bay-window-render = "bay_window_svg_renderer:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["test_bay_window_calculator.py"]
