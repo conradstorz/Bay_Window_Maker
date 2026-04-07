@@ -1,0 +1,34 @@
+What it does now:
+
+searches valid 3-part bay layouts
+assumes equal-height windows
+uses identical left and right side windows
+allows 1 to 4 center window units
+supports a search mode and a verify mode
+lets you use either built-in stock widths or a JSON stock list
+
+A few important notes about this v1:
+
+it treats the side face width as what creates the bay projection
+it checks that the center face covers enough of the masonry passage opening
+it is a layout calculator, not yet a structural engineering tool or cut-list generator
+
+Example usage:
+
+python bay_window_calculator.py search \
+  --opening-width 72 \
+  --opening-height 36 \
+  --projection-depth 16 \
+  --side-angle-deg 30
+
+Verify a specific layout:
+
+python bay_window_calculator.py verify \
+  --opening-width 72 \
+  --opening-height 36 \
+  --projection-depth 16 \
+  --side-angle-deg 30 \
+  --side-width 32 \
+  --center-width 30 \
+  --center-count 2
+
