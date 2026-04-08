@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -999,6 +1000,95 @@ def print_candidates(
             print("\n")
 
 
+def prompt_for_value(
+    prompt: str,
+    type_fn,
+    hint: str = "",
+    validator=None,
+):
+    """Read one value from stdin, retrying until it is valid.
+
+    :param prompt: Human-readable label shown before the colon.
+    :param type_fn: Callable that converts a string (e.g. ``float``, ``int``).
+    :param hint: Optional short note appended in parentheses to the prompt.
+    :param validator: Optional callable ``(value) -> str | None``; return an error
+        message string to reject the value, or ``None`` to accept it.
+    :return: The validated, converted value.
+    """
+
+    display = prompt
+    if hint:
+        display += f" ({hint})"
+    display += ": "
+
+    while True:
+        raw = input(display).strip()
+        if not raw:
+            print("  Value is required, please enter a number.", file=sys.stderr)
+            continue
+        try:
+            value = type_fn(raw)
+        except (ValueError, TypeError):
+            print(f"  Invalid input '{raw}'. Expected a {type_fn.__name__}.", file=sys.stderr)
+            continue
+        if validator is not None:
+            error = validator(value)
+            if error:
+                print(f"  {error}", file=sys.stderr)
+                continue
+        return value
+
+
+def interactive_fill_args(args: argparse.Namespace) -> None:
+    """Prompt interactively for any required CLI argument that was not supplied.
+
+    Required fields that are still ``None`` after argparse are filled in-place.
+    If stdin is not a terminal and values are missing the function exits with a
+    clear error listing the missing flags.
+
+    :param args: Parsed argparse namespace; missing required fields are filled in-place.
+    :raises SystemExit: When stdin is not a tty but required fields are missing.
+    """
+
+    _pos = lambda v: "Must be > 0." if v <= 0 else None
+    _pos_int = lambda v: "Must be >= 1." if v < 1 else None
+
+    required_common = [
+        ("opening_width",   "Masonry opening width",    float, _pos),
+        ("opening_height",  "Common window height",     float, _pos),
+        ("projection_depth","Desired bay projection",   float, _pos),
+    ]
+    required_verify = [
+        ("side_width",   "Side window width",          float, _pos),
+        ("center_width", "Center window width",        float, _pos),
+        ("center_count", "Number of center windows",   int,   _pos_int),
+    ]
+
+    fields_to_check = list(required_common)
+    if getattr(args, "command", None) == "verify":
+        fields_to_check.extend(required_verify)
+
+    missing = [name for name, *_ in fields_to_check if getattr(args, name, None) is None]
+    if not missing:
+        return
+
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "Error: the following required arguments were not provided and stdin is not a "
+            "terminal, so interactive prompting is not possible:\n"
+            + "\n".join(f"  --{name.replace('_', '-')}" for name in missing)
+        )
+
+    print("Bay Window Calculator — interactive input")
+    print("  (supply missing values below, or re-run with full CLI flags)\n")
+
+    for attr, prompt, type_fn, validator in fields_to_check:
+        if getattr(args, attr, None) is None:
+            setattr(args, attr, prompt_for_value(prompt + " in inches", type_fn, validator=validator))
+
+    print()
+
+
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""
 
@@ -1008,9 +1098,9 @@ def parse_args() -> argparse.Namespace:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--opening-width", type=float, required=True, help="Masonry opening width in inches.")
-    common.add_argument("--opening-height", type=float, required=True, help="Common window height in inches.")
-    common.add_argument("--projection-depth", type=float, required=True, help="Requested bay projection in inches.")
+    common.add_argument("--opening-width",    type=float, default=None, help="Masonry opening width in inches.")
+    common.add_argument("--opening-height",   type=float, default=None, help="Common window height in inches.")
+    common.add_argument("--projection-depth", type=float, default=None, help="Requested bay projection in inches.")
     common.add_argument(
         "--side-angle-deg",
         type=float,
@@ -1127,12 +1217,12 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         help="Optional JSON file path where the verified candidate and its calculations will be written.",
     )
-    verify_parser.add_argument("--side-width", type=float, required=True, help="Side window width in inches.")
-    verify_parser.add_argument("--center-width", type=float, required=True, help="Center window width in inches.")
+    verify_parser.add_argument("--side-width",   type=float, default=None, help="Side window width in inches.")
+    verify_parser.add_argument("--center-width", type=float, default=None, help="Center window width in inches.")
     verify_parser.add_argument(
         "--center-count",
         type=int,
-        required=True,
+        default=None,
         help="Number of center window units.",
     )
 
@@ -1174,6 +1264,7 @@ def main() -> None:
     """Run the bay window calculator CLI."""
 
     args = parse_args()
+    interactive_fill_args(args)
     constraints = build_constraints_from_args(args)
     stock_windows = build_stock_windows(args)
 

@@ -1,10 +1,13 @@
 """Tests for bay_window_calculator_with_svg.py"""
 from __future__ import annotations
 
+import argparse
 import json
 import math
+import sys
 import textwrap
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -28,8 +31,10 @@ from bay_window_calculator_with_svg import (
     filter_stock_by_height,
     find_candidates,
     format_candidate,
+    interactive_fill_args,
     is_window_usable,
     load_stock_windows_from_json,
+    prompt_for_value,
     render_candidate_svg,
     score_candidate,
     verify_candidate,
@@ -1792,3 +1797,154 @@ class TestBuildNotesWallOverlap:
                             wall_overlap=7.25)
         combined = " ".join(notes)
         assert "7.25" in combined
+
+
+# ---------------------------------------------------------------------------
+# prompt_for_value – unit tests
+# ---------------------------------------------------------------------------
+
+class TestPromptForValue:
+    def test_returns_float_on_valid_input(self):
+        with patch("builtins.input", return_value="36.5"):
+            result = prompt_for_value("Opening width", float)
+        assert result == pytest.approx(36.5)
+
+    def test_returns_int_on_valid_input(self):
+        with patch("builtins.input", return_value="3"):
+            result = prompt_for_value("Center count", int)
+        assert result == 3
+
+    def test_retries_on_empty_input(self):
+        with patch("builtins.input", side_effect=["", "24.0"]):
+            result = prompt_for_value("Width", float)
+        assert result == pytest.approx(24.0)
+
+    def test_retries_on_non_numeric_input(self):
+        with patch("builtins.input", side_effect=["abc", "30.0"]):
+            result = prompt_for_value("Width", float)
+        assert result == pytest.approx(30.0)
+
+    def test_retries_when_validator_rejects(self):
+        validator = lambda v: "Must be > 0." if v <= 0 else None
+        with patch("builtins.input", side_effect=["-5", "0", "18.0"]):
+            result = prompt_for_value("Width", float, validator=validator)
+        assert result == pytest.approx(18.0)
+
+    def test_accepts_first_valid_value(self):
+        validator = lambda v: None
+        with patch("builtins.input", return_value="72"):
+            result = prompt_for_value("Width", float, validator=validator)
+        assert result == pytest.approx(72.0)
+
+    def test_hint_does_not_affect_return_value(self):
+        with patch("builtins.input", return_value="36"):
+            result = prompt_for_value("Height", float, hint="in inches")
+        assert result == pytest.approx(36.0)
+
+
+# ---------------------------------------------------------------------------
+# interactive_fill_args – unit tests
+# ---------------------------------------------------------------------------
+
+def _make_args(**kwargs) -> argparse.Namespace:
+    """Namespace with None defaults for all required fields."""
+    defaults = dict(
+        command="search",
+        opening_width=None,
+        opening_height=None,
+        projection_depth=None,
+        side_width=None,
+        center_width=None,
+        center_count=None,
+    )
+    defaults.update(kwargs)
+    return argparse.Namespace(**defaults)
+
+
+class TestInteractiveFillArgs:
+    def test_no_prompts_when_all_fields_present(self):
+        args = _make_args(opening_width=72.0, opening_height=36.0, projection_depth=16.0)
+        with patch("builtins.input", side_effect=AssertionError("input() should not be called")):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_args(args)
+        assert args.opening_width == pytest.approx(72.0)
+
+    def test_fills_missing_common_fields_from_stdin(self):
+        args = _make_args()
+        with patch("builtins.input", side_effect=["72.0", "36.0", "16.0"]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_args(args)
+        assert args.opening_width == pytest.approx(72.0)
+        assert args.opening_height == pytest.approx(36.0)
+        assert args.projection_depth == pytest.approx(16.0)
+
+    def test_only_prompts_for_missing_fields(self):
+        args = _make_args(opening_width=72.0, opening_height=36.0)
+        with patch("builtins.input", return_value="16.0"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_args(args)
+        assert args.projection_depth == pytest.approx(16.0)
+        assert args.opening_width == pytest.approx(72.0)
+
+    def test_verify_subcommand_prompts_for_six_fields(self):
+        args = _make_args(command="verify")
+        with patch("builtins.input", side_effect=["72.0", "36.0", "16.0", "26.0", "30.0", "2"]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_args(args)
+        assert args.opening_width == pytest.approx(72.0)
+        assert args.opening_height == pytest.approx(36.0)
+        assert args.projection_depth == pytest.approx(16.0)
+        assert args.side_width == pytest.approx(26.0)
+        assert args.center_width == pytest.approx(30.0)
+        assert args.center_count == 2
+
+    def test_center_count_stored_as_int(self):
+        args = _make_args(command="verify", opening_width=72.0, opening_height=36.0,
+                          projection_depth=16.0, side_width=26.0, center_width=30.0)
+        with patch("builtins.input", return_value="2"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_args(args)
+        assert isinstance(args.center_count, int)
+        assert args.center_count == 2
+
+    def test_non_tty_with_missing_fields_raises_system_exit(self):
+        args = _make_args()
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            with pytest.raises(SystemExit) as exc_info:
+                interactive_fill_args(args)
+        msg = str(exc_info.value)
+        assert "--opening-width" in msg
+        assert "--opening-height" in msg
+        assert "--projection-depth" in msg
+
+    def test_non_tty_with_all_fields_present_does_not_raise(self):
+        args = _make_args(opening_width=72.0, opening_height=36.0, projection_depth=16.0)
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            interactive_fill_args(args)  # must not raise
+
+    def test_non_tty_verify_lists_all_six_missing_flags(self):
+        args = _make_args(command="verify")
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            with pytest.raises(SystemExit) as exc_info:
+                interactive_fill_args(args)
+        msg = str(exc_info.value)
+        for flag in ("--opening-width", "--opening-height", "--projection-depth",
+                     "--side-width", "--center-width", "--center-count"):
+            assert flag in msg
+
+    def test_non_tty_verify_missing_only_verify_fields(self):
+        args = _make_args(command="verify", opening_width=72.0,
+                          opening_height=36.0, projection_depth=16.0)
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            with pytest.raises(SystemExit) as exc_info:
+                interactive_fill_args(args)
+        msg = str(exc_info.value)
+        assert "--side-width" in msg
+        assert "--opening-width" not in msg
+
+    def test_retries_on_bad_input_before_accepting(self):
+        args = _make_args(opening_height=36.0, projection_depth=16.0)
+        with patch("builtins.input", side_effect=["bad", "72.0"]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_args(args)
+        assert args.opening_width == pytest.approx(72.0)
