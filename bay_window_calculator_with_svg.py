@@ -537,6 +537,204 @@ def find_candidates(
     return candidates
 
 
+def diagnose_constraints(
+    constraints: BayConstraints,
+    stock_windows: Sequence[WindowUnit],
+) -> str:
+    """Analyse why find_candidates yielded no results and return a human-readable report.
+
+    Walks the same rejection logic as find_candidates, counting how many combinations
+    were eliminated at each stage and recording the closest near-miss values so the
+    user can understand which constraint to relax and by how much.
+
+    :param constraints: The constraints that produced no candidates.
+    :param stock_windows: The stock window list that was searched.
+    :return: Multi-line string detailing each rejection reason with concrete suggestions.
+    """
+
+    lines: list[str] = ["Diagnostic details:"]
+
+    # ── Stage 1: height matching ────────────────────────────────────────────
+    matching = filter_stock_by_height(stock_windows, constraints.opening_height)
+    if not matching:
+        all_heights = sorted({w.height for w in stock_windows})
+        lines.append(
+            f"\n  [Height mismatch] No stock windows match height {constraints.opening_height}\"."
+        )
+        if all_heights:
+            heights_str = ", ".join(f'{h}"' for h in all_heights)
+            lines.append(f"  Available heights in stock: {heights_str}")
+            closest = min(all_heights, key=lambda h: abs(h - constraints.opening_height))
+            lines.append(f"  Suggestion: try --opening-height {closest}")
+        else:
+            lines.append("  The stock window list appears to be empty.")
+        return "\n".join(lines)
+
+    lines.append(f"\n  {len(matching)} stock window(s) match height {constraints.opening_height}\":")
+    for w in sorted(matching, key=lambda w: w.width):
+        lines.append(f"    {w.width}\" wide × {w.height}\" tall  ({w.style})")
+
+    # ── Stage 2: usability check ────────────────────────────────────────────
+    usable = [w for w in matching if is_window_usable(w, constraints)]
+    if not usable:
+        widths = sorted(w.width for w in matching)
+        lines.append(
+            f"\n  [Usability] None of the height-matched windows pass the width usability check "
+            f"(allowed range: {constraints.min_unit_width}\" – {constraints.max_single_unit_width}\")."
+        )
+        lines.append(
+            f"  Heights-matched window widths: {', '.join(f'{w}\"' for w in widths)}"
+        )
+        lines.append(
+            f"  Suggestions:\n"
+            f"    --min-unit-width {min(widths):.0f}    (lower the minimum width)\n"
+            f"    --max-single-unit-width {max(widths):.0f}  (raise the maximum width)"
+        )
+        return "\n".join(lines)
+
+    # ── Stage 3: full combination loop — count rejections and record near-misses ──
+    n_proj: int = 0
+    best_proj: float = 0.0          # best (largest) projection seen below the requirement
+
+    n_pass: int = 0
+    best_pass: float = 0.0          # best passage fraction seen below the minimum
+
+    n_overlap: int = 0
+    min_overlap: float = math.inf   # smallest overlap still above the limit (closest near-miss)
+
+    n_span: int = 0
+    min_span: float = math.inf      # smallest span still above the limit (closest near-miss)
+
+    for side_window in usable:
+        side_face = calculate_single_window_face(side_window, constraints)
+        actual_proj = calculate_projection_from_side_faces(
+            side_face_width=side_face.finished_face_width,
+            side_angle_deg=constraints.side_angle_deg,
+        )
+
+        if actual_proj < constraints.projection_depth:
+            n_proj += len(usable) * (constraints.max_center_units - constraints.min_center_units + 1)
+            best_proj = max(best_proj, actual_proj)
+            continue
+
+        for center_window in usable:
+            for center_count in range(constraints.min_center_units, constraints.max_center_units + 1):
+                center_face = calculate_center_face(center_window, center_count, constraints)
+                passage_overlap_width = min(center_face.finished_face_width, constraints.opening_width)
+                passage_frac = passage_overlap_width / max(constraints.opening_width, 1.0)
+
+                if passage_frac < constraints.min_passage_fraction:
+                    n_pass += 1
+                    best_pass = max(best_pass, passage_frac)
+                    continue
+
+                wall_span = calculate_wall_parallel_span(
+                    center_face_width=center_face.finished_face_width,
+                    side_face_width=side_face.finished_face_width,
+                    side_angle_deg=constraints.side_angle_deg,
+                )
+                wall_ov = calculate_wall_overlap(wall_span, constraints.opening_width)
+
+                if (
+                    constraints.max_wall_overlap is not None
+                    and wall_ov > constraints.max_wall_overlap
+                ):
+                    n_overlap += 1
+                    min_overlap = min(min_overlap, wall_ov)
+                    continue
+
+                if (
+                    constraints.max_wall_parallel_span is not None
+                    and wall_span > constraints.max_wall_parallel_span
+                ):
+                    n_span += 1
+                    min_span = min(min_span, wall_span)
+                    continue
+
+    # ── Stage 4: format the report ──────────────────────────────────────────
+    any_rejected = False
+
+    if n_proj:
+        any_rejected = True
+        lines.append(
+            f"\n  [Projection] {n_proj} combination(s) rejected — no side window can deliver the "
+            f"required projection at the selected angle."
+        )
+        lines.append(f"  Best achievable projection from available stock: {best_proj:.2f}\"")
+        lines.append(f"  Required projection (--projection-depth): {constraints.projection_depth:.2f}\"")
+        suggested = math.floor(best_proj * 10) / 10
+        lines.append(
+            f"  Suggestions:\n"
+            f"    --projection-depth {suggested:.1f}   (reduce the required projection)\n"
+            f"    Use a wider side window to increase the diagonal reach."
+        )
+
+    if n_pass:
+        any_rejected = True
+        lines.append(
+            f"\n  [Passage width] {n_pass} combination(s) rejected — the centre face does not cover "
+            f"enough of the masonry opening."
+        )
+        lines.append(
+            f"  Best passage fraction seen: {best_pass:.1%}   "
+            f"(need ≥ {constraints.min_passage_fraction:.1%})"
+        )
+        suggested_frac = max(0.0, round(best_pass - 0.005, 3))
+        lines.append(
+            f"  Suggestions:\n"
+            f"    --min-passage-fraction {suggested_frac:.3f}   (lower the minimum)\n"
+            f"    Use wider or more centre window units."
+        )
+
+    if n_overlap:
+        any_rejected = True
+        lines.append(
+            f"\n  [Wall overlap] {n_overlap} combination(s) rejected — the bay extends too far "
+            f"beyond the masonry opening on each side."
+        )
+        if math.isfinite(min_overlap):
+            lines.append(
+                f"  Smallest overlap seen that still exceeded the limit: {min_overlap:.2f}\"  "
+                f"(limit is {constraints.max_wall_overlap:.2f}\")"
+            )
+            suggested_limit = math.ceil(min_overlap * 10) / 10
+            lines.append(
+                f"  Suggestions:\n"
+                f"    --max-wall-overlap {suggested_limit:.1f}   (raise the limit)\n"
+                f"    Use a narrower side window to reduce the side projection."
+            )
+
+    if n_span:
+        any_rejected = True
+        lines.append(
+            f"\n  [Wall span] {n_span} combination(s) rejected — total wall-parallel span of the "
+            f"bay exceeds your maximum."
+        )
+        if math.isfinite(min_span):
+            lines.append(
+                f"  Smallest span seen that still exceeded the limit: {min_span:.2f}\"  "
+                f"(limit is {constraints.max_wall_parallel_span:.2f}\")"
+            )
+            suggested_limit = math.ceil(min_span * 10) / 10
+            lines.append(
+                f"  Suggestions:\n"
+                f"    --max-wall-span {suggested_limit:.1f}   (raise the limit)\n"
+                f"    Use narrower side or centre windows."
+            )
+
+    if not any_rejected:
+        lines.append(
+            "\n  All combinations were eliminated at the height or usability stage — "
+            "no per-combination analysis was possible."
+        )
+        lines.append(
+            "  Check that the stock window list contains units that are both the right height "
+            "and within the allowed width range."
+        )
+
+    return "\n".join(lines)
+
+
 def verify_candidate(
     constraints: BayConstraints,
     side_width: float,
@@ -1398,6 +1596,10 @@ def main() -> None:
 
     if args.command == "search":
         candidates = find_candidates(constraints=constraints, stock_windows=stock_windows)
+        if not candidates:
+            print("No valid candidates were found with the current constraints.\n")
+            print(diagnose_constraints(constraints, stock_windows))
+            return
         print_candidates(
             candidates=candidates,
             limit=args.limit,
@@ -1411,12 +1613,16 @@ def main() -> None:
         return
 
     if args.command == "verify":
-        candidate = verify_candidate(
-            constraints=constraints,
-            side_width=args.side_width,
-            center_width=args.center_width,
-            center_count=args.center_count,
-        )
+        try:
+            candidate = verify_candidate(
+                constraints=constraints,
+                side_width=args.side_width,
+                center_width=args.center_width,
+                center_count=args.center_count,
+            )
+        except ValueError as exc:
+            print(f"Constraint violation: {exc}", file=sys.stderr)
+            sys.exit(1)
         print(format_candidate(candidate))
         if args.svg_output:
             args.svg_output.parent.mkdir(parents=True, exist_ok=True)

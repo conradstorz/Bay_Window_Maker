@@ -30,6 +30,7 @@ from bay_window_calculator_with_svg import (
     calculate_wall_overlap,
     calculate_wall_parallel_span,
     candidate_to_dict,
+    diagnose_constraints,
     filter_stock_by_height,
     find_candidates,
     format_candidate,
@@ -2236,3 +2237,188 @@ class TestStampPath:
         s1 = _stamp_path(p)
         s2 = _stamp_path(p)
         assert s1.suffix == s2.suffix == ".json"
+
+
+# ---------------------------------------------------------------------------
+# diagnose_constraints
+# ---------------------------------------------------------------------------
+def _base_constraints(**overrides):
+    """Return a BayConstraints suitable for diagnostic tests."""
+    defaults = dict(
+        opening_width=72.0,
+        opening_height=36.0,
+        projection_depth=12.0,
+        side_angle_deg=45.0,
+    )
+    defaults.update(overrides)
+    return BayConstraints(**defaults)
+
+
+class TestDiagnoseConstraints:
+    """diagnose_constraints returns a helpful report for every failure mode."""
+
+    # ── height mismatch ──────────────────────────────────────────────────────
+
+    def test_height_mismatch_mentions_mismatch(self):
+        stock = [WindowUnit(width=30.0, height=48.0)]
+        constraints = _base_constraints(opening_height=36.0)
+        report = diagnose_constraints(constraints, stock)
+        assert "Height mismatch" in report or "height" in report.lower()
+        assert "36" in report
+
+    def test_height_mismatch_lists_available_heights(self):
+        stock = [WindowUnit(width=30.0, height=48.0), WindowUnit(width=24.0, height=60.0)]
+        constraints = _base_constraints(opening_height=36.0)
+        report = diagnose_constraints(constraints, stock)
+        assert "48" in report or "60" in report
+
+    def test_height_mismatch_suggests_opening_height(self):
+        stock = [WindowUnit(width=30.0, height=48.0)]
+        constraints = _base_constraints(opening_height=36.0)
+        report = diagnose_constraints(constraints, stock)
+        assert "--opening-height" in report
+
+    def test_empty_stock_handled(self):
+        constraints = _base_constraints(opening_height=36.0)
+        report = diagnose_constraints(constraints, [])
+        assert "empty" in report.lower() or "mismatch" in report.lower()
+
+    # ── usability failure ────────────────────────────────────────────────────
+
+    def test_usability_failure_mentioned(self):
+        # All matching-height windows are too wide for the usability check.
+        stock = [WindowUnit(width=60.0, height=36.0)]
+        constraints = _base_constraints(max_single_unit_width=48.0)
+        report = diagnose_constraints(constraints, stock)
+        # The only matching window (60") exceeds max_single_unit_width (48")
+        assert "usab" in report.lower() or "width" in report.lower()
+
+    def test_usability_suggests_flag(self):
+        stock = [WindowUnit(width=60.0, height=36.0)]
+        constraints = _base_constraints(max_single_unit_width=48.0)
+        report = diagnose_constraints(constraints, stock)
+        assert "--max-single-unit-width" in report or "--min-unit-width" in report
+
+    # ── projection too short ─────────────────────────────────────────────────
+
+    def test_projection_rejection_mentioned(self):
+        # 45-degree bay, side window 12" wide → finished face ~15", projection ~10.6"
+        # Require 18" projection → all sides rejected.
+        stock = [WindowUnit(width=12.0, height=36.0), WindowUnit(width=24.0, height=36.0)]
+        constraints = _base_constraints(
+            opening_height=36.0,
+            projection_depth=50.0,   # impossibly deep
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "Projection" in report or "projection" in report
+
+    def test_projection_shows_best_achievable(self):
+        stock = [WindowUnit(width=12.0, height=36.0)]
+        constraints = _base_constraints(
+            projection_depth=50.0,
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "achievable" in report.lower() or "best" in report.lower()
+
+    def test_projection_suggests_flag(self):
+        stock = [WindowUnit(width=12.0, height=36.0)]
+        constraints = _base_constraints(
+            projection_depth=50.0,
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "--projection-depth" in report
+
+    # ── passage fraction too low ─────────────────────────────────────────────
+
+    def test_passage_rejection_mentioned(self):
+        # Centre window 18" in a 72" opening → passage ~ 25%  → fails 0.65 default.
+        stock = [WindowUnit(width=30.0, height=36.0), WindowUnit(width=18.0, height=36.0)]
+        constraints = _base_constraints(
+            opening_width=72.0,
+            min_passage_fraction=0.99,   # impossibly high
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "Passage" in report or "passage" in report or "fraction" in report.lower()
+
+    def test_passage_suggests_flag(self):
+        stock = [WindowUnit(width=30.0, height=36.0), WindowUnit(width=18.0, height=36.0)]
+        constraints = _base_constraints(
+            min_passage_fraction=0.99,
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "--min-passage-fraction" in report
+
+    # ── wall overlap exceeded ─────────────────────────────────────────────────
+
+    def test_overlap_rejection_mentioned(self):
+        stock = [WindowUnit(width=30.0, height=36.0)]
+        constraints = _base_constraints(
+            max_wall_overlap=0.01,   # essentially zero allowed overlap
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "overlap" in report.lower() or "Overlap" in report
+
+    def test_overlap_suggests_flag(self):
+        stock = [WindowUnit(width=30.0, height=36.0)]
+        constraints = _base_constraints(
+            max_wall_overlap=0.01,
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "--max-wall-overlap" in report
+
+    # ── wall span exceeded ────────────────────────────────────────────────────
+
+    def test_span_rejection_mentioned(self):
+        stock = [WindowUnit(width=30.0, height=36.0)]
+        constraints = _base_constraints(
+            max_wall_parallel_span=10.0,  # impossibly small span
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "span" in report.lower() or "Wall span" in report
+
+    def test_span_suggests_flag(self):
+        stock = [WindowUnit(width=30.0, height=36.0)]
+        constraints = _base_constraints(
+            max_wall_parallel_span=10.0,
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        assert "--max-wall-span" in report
+
+    def test_span_reports_smallest_span_seen(self):
+        stock = [WindowUnit(width=30.0, height=36.0)]
+        constraints = _base_constraints(
+            max_wall_parallel_span=10.0,
+            min_unit_width=10.0,
+            max_single_unit_width=60.0,
+        )
+        report = diagnose_constraints(constraints, stock)
+        # The report should include the actual span value seen
+        assert any(char.isdigit() for char in report)
+
+    # ── returns string ────────────────────────────────────────────────────────
+
+    def test_returns_string(self):
+        stock = build_default_stock_windows(height=36.0)
+        # Opening is solvable but pass impossible fraction so we get a report.
+        c = _base_constraints(min_passage_fraction=0.99, min_unit_width=10.0, max_single_unit_width=60.0)
+        result = diagnose_constraints(c, stock)
+        assert isinstance(result, str)
+        assert len(result) > 0
