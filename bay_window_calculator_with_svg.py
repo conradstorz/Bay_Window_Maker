@@ -118,6 +118,8 @@ class BayCandidate:
     passage_overlap_width: float
     passage_overlap_fraction: float
     wall_overlap: float
+    side_tilt_cleaning_ok: bool
+    centre_tilt_cleaning_ok: bool
     score: float
     notes: tuple[str, ...]
 
@@ -316,6 +318,23 @@ def calculate_wall_overlap(wall_parallel_span: float, opening_width: float) -> f
     return max(0.0, (wall_parallel_span - opening_width) / 2.0)
 
 
+def calculate_max_cleanable_wall_overlap(frame_body_depth: float, side_angle_deg: float) -> float:
+    """Return the maximum per-side wall overlap that still allows full 90° tilt-in sash cleaning.
+
+    When a side window's sash tilts inward for cleaning, its inner face must start within
+    the masonry opening width rather than behind solid masonry.  The frame body depth shifts
+    the sash inward along the face-normal direction; the wall-parallel component of this
+    shift is frame_body_depth × sin(side_angle_deg).  So any wall overlap up to this value
+    leaves the sash inner face inside the opening and allows a full tilt.
+
+    :param frame_body_depth: Window frame depth from outer face to inner (sash) face in inches.
+    :param side_angle_deg: Bay side face angle relative to the masonry wall in degrees.
+    :return: Maximum cleanable per-side wall overlap in inches.
+    """
+
+    return frame_body_depth * math.sin(math.radians(side_angle_deg))
+
+
 def build_notes(
     side_window: WindowUnit,
     center_window: WindowUnit,
@@ -323,6 +342,8 @@ def build_notes(
     passage_overlap_fraction: float,
     constraints: BayConstraints,
     wall_overlap: float = 0.0,
+    side_tilt_cleaning_ok: bool = True,
+    centre_tilt_cleaning_ok: bool = True,
 ) -> tuple[str, ...]:
     """Create explanatory notes for a candidate."""
 
@@ -351,6 +372,23 @@ def build_notes(
         )
     else:
         notes.append("Bay fits within the masonry opening width.")
+
+    if not side_tilt_cleaning_ok:
+        max_ok = calculate_max_cleanable_wall_overlap(
+            constraints.frame_body_depth, constraints.side_angle_deg
+        )
+        notes.append(
+            f"Side sash tilt-in cleaning is RESTRICTED: wall overlap ({wall_overlap:.2f}\") "
+            f"exceeds the cleanable limit of {max_ok:.2f}\" "
+            f"(= frame_body_depth {constraints.frame_body_depth}\" × sin({constraints.side_angle_deg}°))."
+        )
+    if not centre_tilt_cleaning_ok:
+        notes.append(
+            "Centre sash tilt-in cleaning is RESTRICTED: centre face is wider than the masonry "
+            f"opening by more than frame_body_depth ({constraints.frame_body_depth}\") per side."
+        )
+    if side_tilt_cleaning_ok and centre_tilt_cleaning_ok:
+        notes.append("All sashes can tilt in fully for cleaning.")
 
     return tuple(notes)
 
@@ -495,6 +533,14 @@ def find_candidates(
                 ):
                     continue
 
+                max_cleanable_overlap = calculate_max_cleanable_wall_overlap(
+                    constraints.frame_body_depth, constraints.side_angle_deg
+                )
+                side_tilt_ok = wall_overlap <= max_cleanable_overlap
+                # Centre: cleanable if face width ≤ opening_width + 2 * frame_body_depth
+                centre_max_width = constraints.opening_width + 2.0 * constraints.frame_body_depth
+                centre_tilt_ok = center_face.finished_face_width <= centre_max_width
+
                 score = score_candidate(
                     side_window=side_window,
                     center_window=center_window,
@@ -510,6 +556,8 @@ def find_candidates(
                     passage_overlap_fraction=passage_overlap_fraction,
                     constraints=constraints,
                     wall_overlap=wall_overlap,
+                    side_tilt_cleaning_ok=side_tilt_ok,
+                    centre_tilt_cleaning_ok=centre_tilt_ok,
                 )
 
                 candidates.append(
@@ -528,6 +576,8 @@ def find_candidates(
                         passage_overlap_width=passage_overlap_width,
                         passage_overlap_fraction=passage_overlap_fraction,
                         wall_overlap=wall_overlap,
+                        side_tilt_cleaning_ok=side_tilt_ok,
+                        centre_tilt_cleaning_ok=centre_tilt_ok,
                         score=score,
                         notes=notes,
                     )
@@ -815,6 +865,12 @@ def verify_candidate(
         passage_overlap_fraction=passage_overlap_fraction,
         constraints=constraints,
     )
+    max_cleanable_overlap = calculate_max_cleanable_wall_overlap(
+        constraints.frame_body_depth, constraints.side_angle_deg
+    )
+    side_tilt_ok = wall_overlap <= max_cleanable_overlap
+    centre_max_width = constraints.opening_width + 2.0 * constraints.frame_body_depth
+    centre_tilt_ok = center_face.finished_face_width <= centre_max_width
     notes = build_notes(
         side_window=side_window,
         center_window=center_window,
@@ -822,6 +878,8 @@ def verify_candidate(
         passage_overlap_fraction=passage_overlap_fraction,
         constraints=constraints,
         wall_overlap=wall_overlap,
+        side_tilt_cleaning_ok=side_tilt_ok,
+        centre_tilt_cleaning_ok=centre_tilt_ok,
     )
 
     return BayCandidate(
@@ -839,6 +897,8 @@ def verify_candidate(
         passage_overlap_width=passage_overlap_width,
         passage_overlap_fraction=passage_overlap_fraction,
         wall_overlap=wall_overlap,
+        side_tilt_cleaning_ok=side_tilt_ok,
+        centre_tilt_cleaning_ok=centre_tilt_ok,
         score=score,
         notes=notes,
     )
@@ -868,6 +928,10 @@ def format_candidate(candidate: BayCandidate, rank: int | None = None) -> str:
     )
     lines.append(f"  Actual projection:          {candidate.projection_depth:.2f}\"")
     lines.append(f"  Wall overlap per side:      {candidate.wall_overlap:.2f}\"")
+    side_clean = "OK" if candidate.side_tilt_cleaning_ok else "RESTRICTED"
+    ctr_clean = "OK" if candidate.centre_tilt_cleaning_ok else "RESTRICTED"
+    lines.append(f"  Tilt-in cleaning (side):    {side_clean}")
+    lines.append(f"  Tilt-in cleaning (centre):  {ctr_clean}")
     lines.append("")
     lines.append("Masonry opening relation")
     lines.append(f"  Passage overlap width:      {candidate.passage_overlap_width:.2f}\"")
@@ -1117,6 +1181,9 @@ def candidate_to_dict(
         "passage_overlap_width": candidate.passage_overlap_width,
         "passage_overlap_fraction": candidate.passage_overlap_fraction,
         "wall_overlap": candidate.wall_overlap,
+        "side_tilt_cleaning_ok": candidate.side_tilt_cleaning_ok,
+        "centre_tilt_cleaning_ok": candidate.centre_tilt_cleaning_ok,
+        "tilt_cleaning_ok": candidate.side_tilt_cleaning_ok and candidate.centre_tilt_cleaning_ok,
         "score": candidate.score,
         "notes": list(candidate.notes),
     }

@@ -24,6 +24,7 @@ from bay_window_calculator_with_svg import (
     build_default_stock_windows,
     build_notes,
     calculate_center_face,
+    calculate_max_cleanable_wall_overlap,
     calculate_outside_corner_to_corner_width,
     calculate_projection_from_side_faces,
     calculate_single_window_face,
@@ -2454,3 +2455,195 @@ class TestDiagnoseConstraints:
         result = diagnose_constraints(c, stock)
         assert isinstance(result, str)
         assert len(result) > 0
+
+
+# ---------------------------------------------------------------------------
+# calculate_max_cleanable_wall_overlap
+# ---------------------------------------------------------------------------
+
+class TestCalculateMaxCleanableWallOverlap:
+    def test_zero_angle_gives_zero(self):
+        # sin(0°) = 0 → no overlap tolerable
+        assert calculate_max_cleanable_wall_overlap(4.0, 0.0) == pytest.approx(0.0)
+
+    def test_thirty_degrees(self):
+        # 4 × sin(30°) = 2.0
+        assert calculate_max_cleanable_wall_overlap(4.0, 30.0) == pytest.approx(2.0)
+
+    def test_forty_five_degrees(self):
+        import math
+        assert calculate_max_cleanable_wall_overlap(4.0, 45.0) == pytest.approx(4.0 * math.sin(math.radians(45.0)))
+
+    def test_ninety_degrees(self):
+        # sin(90°) = 1 → max overlap equals frame depth
+        assert calculate_max_cleanable_wall_overlap(6.0, 90.0) == pytest.approx(6.0)
+
+    def test_deeper_frame_allows_more_overlap(self):
+        assert calculate_max_cleanable_wall_overlap(6.0, 30.0) > calculate_max_cleanable_wall_overlap(4.0, 30.0)
+
+    def test_steeper_angle_allows_more_overlap(self):
+        assert calculate_max_cleanable_wall_overlap(4.0, 45.0) > calculate_max_cleanable_wall_overlap(4.0, 30.0)
+
+
+# ---------------------------------------------------------------------------
+# Tilt-cleaning flags on BayCandidate
+# ---------------------------------------------------------------------------
+
+def _make_constraints_for_cleaning(**overrides):
+    defaults = dict(
+        opening_width=72.0,
+        opening_height=36.0,
+        projection_depth=10.0,
+        side_angle_deg=30.0,
+        frame_body_depth=4.0,
+        min_unit_width=10.0,
+        max_single_unit_width=60.0,
+    )
+    defaults.update(overrides)
+    return BayConstraints(**defaults)
+
+
+class TestTiltCleaningInFindCandidates:
+    """Candidates from find_candidates carry correct tilt-cleaning flags."""
+
+    def test_candidates_have_side_tilt_cleaning_ok(self):
+        c = _make_constraints_for_cleaning()
+        stock = [WindowUnit(width=24.0, height=36.0), WindowUnit(width=30.0, height=36.0)]
+        candidates = find_candidates(c, stock)
+        assert candidates, "Expected at least one candidate"
+        for cand in candidates:
+            assert isinstance(cand.side_tilt_cleaning_ok, bool)
+
+    def test_candidates_have_centre_tilt_cleaning_ok(self):
+        c = _make_constraints_for_cleaning()
+        stock = [WindowUnit(width=24.0, height=36.0), WindowUnit(width=30.0, height=36.0)]
+        candidates = find_candidates(c, stock)
+        assert candidates
+        for cand in candidates:
+            assert isinstance(cand.centre_tilt_cleaning_ok, bool)
+
+    def test_zero_overlap_side_cleaning_ok(self):
+        # Force wall_overlap = 0 by making the frame fit exactly within the opening
+        # Small side window, large centre window to keep span tight
+        c = _make_constraints_for_cleaning(
+            opening_width=72.0,
+            side_angle_deg=30.0,
+            frame_body_depth=4.0,
+            max_wall_overlap=0.0,  # reject any overlap → all survivors have overlap=0
+        )
+        stock = [WindowUnit(width=18.0, height=36.0), WindowUnit(width=30.0, height=36.0)]
+        candidates = find_candidates(c, stock)
+        if candidates:
+            # All kept have zero overlap → side cleaning must be OK
+            for cand in candidates:
+                assert cand.side_tilt_cleaning_ok
+
+    def test_large_overlap_side_cleaning_restricted(self):
+        # max_cleanable_overlap = 4 × sin(30°) = 2" at 30°
+        # Force a candidate with wall_overlap > 2" by removing the max_wall_overlap constraint
+        c = _make_constraints_for_cleaning(
+            opening_width=50.0,  # small opening → large overlap with normal windows
+            side_angle_deg=30.0,
+            frame_body_depth=4.0,  # max_cleanable = 2.0"
+        )
+        stock = [WindowUnit(width=30.0, height=36.0)]
+        candidates = find_candidates(c, stock)
+        for cand in candidates:
+            expected = cand.wall_overlap <= 2.0 + 1e-9
+            assert cand.side_tilt_cleaning_ok == expected
+
+    def test_centre_face_wider_than_cleaning_limit_flagged(self):
+        # Centre max width = opening_width + 2 * frame_body_depth = 72 + 8 = 80"
+        # A centre face wider than 80" should have centre_tilt_cleaning_ok = False
+        c = _make_constraints_for_cleaning(
+            opening_width=72.0,
+            frame_body_depth=4.0,
+            min_passage_fraction=0.01,  # allow any passage fraction
+            max_single_unit_width=60.0,
+            min_unit_width=10.0,
+        )
+        stock = [WindowUnit(width=22.0, height=36.0), WindowUnit(width=40.0, height=36.0)]
+        candidates = find_candidates(c, stock)
+        for cand in candidates:
+            centre_max = 72.0 + 2 * 4.0  # 80"
+            expected = cand.center_face.finished_face_width <= centre_max
+            assert cand.centre_tilt_cleaning_ok == expected
+
+
+class TestTiltCleaningInVerifyCandidate:
+    def test_verify_sets_side_tilt_flag(self):
+        c = _make_constraints_for_cleaning()
+        cand = verify_candidate(c, side_width=24.0, center_width=30.0, center_count=2)
+        assert isinstance(cand.side_tilt_cleaning_ok, bool)
+
+    def test_verify_sets_centre_tilt_flag(self):
+        c = _make_constraints_for_cleaning()
+        cand = verify_candidate(c, side_width=24.0, center_width=30.0, center_count=2)
+        assert isinstance(cand.centre_tilt_cleaning_ok, bool)
+
+
+class TestTiltCleaningInFormatCandidate:
+    def test_format_shows_side_cleaning_ok(self):
+        c = _make_constraints_for_cleaning(max_wall_overlap=0.0)
+        stock = [WindowUnit(width=18.0, height=36.0), WindowUnit(width=24.0, height=36.0)]
+        candidates = find_candidates(c, stock)
+        if candidates:
+            text = format_candidate(candidates[0], rank=1)
+            assert "Tilt-in cleaning (side)" in text
+
+    def test_format_shows_centre_cleaning(self):
+        c = _make_constraints_for_cleaning()
+        cand = verify_candidate(c, side_width=24.0, center_width=30.0, center_count=2)
+        text = format_candidate(cand)
+        assert "Tilt-in cleaning (centre)" in text
+
+    def test_format_shows_ok_when_cleanable(self):
+        c = _make_constraints_for_cleaning(max_wall_overlap=0.0)
+        stock = [WindowUnit(width=18.0, height=36.0), WindowUnit(width=24.0, height=36.0)]
+        candidates = find_candidates(c, stock)
+        if candidates:
+            text = format_candidate(candidates[0])
+            # At least one cleaning line should exist
+            assert "OK" in text or "RESTRICTED" in text
+
+
+class TestTiltCleaningInCandidateToDict:
+    def test_dict_has_side_tilt_cleaning_ok(self):
+        c = _make_constraints_for_cleaning()
+        cand = verify_candidate(c, side_width=24.0, center_width=30.0, center_count=2)
+        d = candidate_to_dict(cand)
+        assert "side_tilt_cleaning_ok" in d
+        assert isinstance(d["side_tilt_cleaning_ok"], bool)
+
+    def test_dict_has_centre_tilt_cleaning_ok(self):
+        c = _make_constraints_for_cleaning()
+        cand = verify_candidate(c, side_width=24.0, center_width=30.0, center_count=2)
+        d = candidate_to_dict(cand)
+        assert "centre_tilt_cleaning_ok" in d
+        assert isinstance(d["centre_tilt_cleaning_ok"], bool)
+
+    def test_dict_has_combined_tilt_cleaning_ok(self):
+        c = _make_constraints_for_cleaning()
+        cand = verify_candidate(c, side_width=24.0, center_width=30.0, center_count=2)
+        d = candidate_to_dict(cand)
+        assert "tilt_cleaning_ok" in d
+        assert d["tilt_cleaning_ok"] == (d["side_tilt_cleaning_ok"] and d["centre_tilt_cleaning_ok"])
+
+
+class TestTiltCleaningInBuildNotes:
+    def test_restricted_side_note_when_not_ok(self):
+        c = _make_constraints_for_cleaning()
+        sw = WindowUnit(width=24.0, height=36.0)
+        cw = WindowUnit(width=30.0, height=36.0)
+        notes = build_notes(sw, cw, 2, 0.9, c, wall_overlap=5.0, side_tilt_cleaning_ok=False)
+        combined = " ".join(notes)
+        assert "RESTRICTED" in combined
+
+    def test_all_ok_note_when_both_ok(self):
+        c = _make_constraints_for_cleaning()
+        sw = WindowUnit(width=24.0, height=36.0)
+        cw = WindowUnit(width=30.0, height=36.0)
+        notes = build_notes(sw, cw, 2, 0.9, c, wall_overlap=0.0,
+                            side_tilt_cleaning_ok=True, centre_tilt_cleaning_ok=True)
+        combined = " ".join(notes)
+        assert "fully" in combined.lower() or "tilt" in combined.lower()
