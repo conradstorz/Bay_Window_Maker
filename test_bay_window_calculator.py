@@ -19,6 +19,7 @@ from bay_window_calculator_with_svg import (
     _face_rectangle,
     _prompt_for_subcommand,
     _rotate_point,
+    _stamp_path,
     _translate_points,
     build_default_stock_windows,
     build_notes,
@@ -33,9 +34,11 @@ from bay_window_calculator_with_svg import (
     find_candidates,
     format_candidate,
     interactive_fill_args,
+    interactive_fill_optional_args,
     is_window_usable,
     load_stock_windows_from_json,
     prompt_for_value,
+    prompt_optional_float,
     render_candidate_svg,
     score_candidate,
     verify_candidate,
@@ -1857,6 +1860,8 @@ def _make_args(**kwargs) -> argparse.Namespace:
         side_width=None,
         center_width=None,
         center_count=None,
+        max_wall_parallel_span=None,
+        max_wall_overlap=None,
     )
     defaults.update(kwargs)
     return argparse.Namespace(**defaults)
@@ -2001,3 +2006,233 @@ class TestPromptForSubcommand:
         with patch("builtins.input", return_value="SEARCH"):
             with patch.object(sys.stdin, "isatty", return_value=True):
                 assert _prompt_for_subcommand() == "search"
+
+
+# ---------------------------------------------------------------------------
+# BayConstraints – max_wall_parallel_span field
+# ---------------------------------------------------------------------------
+
+class TestBayConstraintsMaxWallParallelSpan:
+    def test_default_is_none(self):
+        assert default_constraints().max_wall_parallel_span is None
+
+    def test_can_be_set_to_float(self):
+        c = default_constraints(max_wall_parallel_span=120.0)
+        assert c.max_wall_parallel_span == pytest.approx(120.0)
+
+    def test_frozen_rejects_mutation(self):
+        c = default_constraints(max_wall_parallel_span=120.0)
+        with pytest.raises(Exception):
+            c.max_wall_parallel_span = 200.0
+
+    def test_different_values_make_unequal_constraints(self):
+        assert default_constraints(max_wall_parallel_span=100.0) != default_constraints(max_wall_parallel_span=200.0)
+
+
+# ---------------------------------------------------------------------------
+# find_candidates – max_wall_parallel_span filtering
+# ---------------------------------------------------------------------------
+
+class TestFindCandidatesMaxWallParallelSpan:
+    def test_tight_span_reduces_candidates(self):
+        c_none = default_constraints()
+        c_tight = default_constraints(max_wall_parallel_span=100.0)
+        stock = build_default_stock_windows(c_none.opening_height)
+        assert len(find_candidates(c_tight, stock)) <= len(find_candidates(c_none, stock))
+
+    def test_all_returned_satisfy_constraint(self):
+        limit = 120.0
+        c = default_constraints(max_wall_parallel_span=limit)
+        stock = build_default_stock_windows(c.opening_height)
+        for cand in find_candidates(c, stock):
+            assert cand.wall_parallel_span <= limit + 1e-9
+
+    def test_very_large_limit_same_count_as_none(self):
+        c_none = default_constraints()
+        c_huge = default_constraints(max_wall_parallel_span=100_000.0)
+        stock = build_default_stock_windows(c_none.opening_height)
+        assert len(find_candidates(c_huge, stock)) == len(find_candidates(c_none, stock))
+
+    def test_narrower_than_opening_excludes_all(self):
+        # Span can never be less than the center face alone, which must be >= 65% of 72"
+        c = default_constraints(max_wall_parallel_span=10.0)
+        stock = build_default_stock_windows(c.opening_height)
+        assert find_candidates(c, stock) == []
+
+
+# ---------------------------------------------------------------------------
+# verify_candidate – max_wall_parallel_span enforcement
+# ---------------------------------------------------------------------------
+
+class TestVerifyCandidateMaxWallParallelSpan:
+    def test_raises_when_span_exceeded(self):
+        # side=30 + default framing gives span >> 100"
+        c = default_constraints(max_wall_parallel_span=100.0)
+        with pytest.raises(ValueError, match="[Ww]all.parallel span"):
+            verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+
+    def test_does_not_raise_when_within_limit(self):
+        c_ref = default_constraints()
+        cand_ref = verify_candidate(c_ref, side_width=30.0, center_width=30.0, center_count=2)
+        c_ok = default_constraints(max_wall_parallel_span=cand_ref.wall_parallel_span)
+        cand = verify_candidate(c_ok, side_width=30.0, center_width=30.0, center_count=2)
+        assert cand.wall_parallel_span == pytest.approx(cand_ref.wall_parallel_span)
+
+    def test_does_not_raise_when_no_constraint(self):
+        c = default_constraints()
+        verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+
+    def test_error_message_mentions_span(self):
+        c = default_constraints(max_wall_parallel_span=100.0)
+        with pytest.raises(ValueError) as exc_info:
+            verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+        assert "span" in str(exc_info.value).lower()
+
+
+# ---------------------------------------------------------------------------
+# candidate_to_dict – max_wall_parallel_span in constraints sub-dict
+# ---------------------------------------------------------------------------
+
+class TestCandidateToDictMaxWallParallelSpan:
+    def test_key_present_when_constraint_set(self):
+        c_ref = default_constraints()
+        cand = verify_candidate(c_ref, side_width=30.0, center_width=30.0, center_count=2)
+        c = default_constraints(max_wall_parallel_span=1000.0)
+        d = candidate_to_dict(cand, constraints=c)
+        assert "max_wall_parallel_span" in d["constraints"]
+        assert d["constraints"]["max_wall_parallel_span"] == pytest.approx(1000.0)
+
+    def test_key_is_none_when_not_set(self):
+        c = default_constraints()
+        cand = verify_candidate(c, side_width=30.0, center_width=30.0, center_count=2)
+        d = candidate_to_dict(cand, constraints=c)
+        assert d["constraints"]["max_wall_parallel_span"] is None
+
+
+# ---------------------------------------------------------------------------
+# prompt_optional_float – unit tests
+# ---------------------------------------------------------------------------
+
+class TestPromptOptionalFloat:
+    def test_returns_float_on_valid_input(self):
+        with patch("builtins.input", return_value="96.0"):
+            assert prompt_optional_float("Max span") == pytest.approx(96.0)
+
+    def test_returns_none_on_empty_input(self):
+        with patch("builtins.input", return_value=""):
+            assert prompt_optional_float("Max span") is None
+
+    def test_returns_none_on_whitespace_input(self):
+        with patch("builtins.input", return_value="   "):
+            assert prompt_optional_float("Max span") is None
+
+    def test_returns_none_on_invalid_input(self):
+        with patch("builtins.input", return_value="abc"):
+            assert prompt_optional_float("Max span") is None
+
+    def test_hint_does_not_affect_return_value(self):
+        with patch("builtins.input", return_value="120"):
+            assert prompt_optional_float("Max span", hint="inches") == pytest.approx(120.0)
+
+    def test_accepts_integer_string(self):
+        with patch("builtins.input", return_value="120"):
+            result = prompt_optional_float("Max span")
+        assert isinstance(result, float)
+        assert result == pytest.approx(120.0)
+
+
+# ---------------------------------------------------------------------------
+# interactive_fill_args – returns bool
+# ---------------------------------------------------------------------------
+
+class TestInteractiveFillArgsReturnsBool:
+    def test_returns_false_when_all_present(self):
+        args = _make_args(opening_width=72.0, opening_height=36.0, projection_depth=16.0)
+        result = interactive_fill_args(args)
+        assert result is False
+
+    def test_returns_true_when_field_prompted(self):
+        args = _make_args(opening_height=36.0, projection_depth=16.0)
+        with patch("builtins.input", return_value="72.0"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                result = interactive_fill_args(args)
+        assert result is True
+
+
+# ---------------------------------------------------------------------------
+# interactive_fill_optional_args – unit tests
+# ---------------------------------------------------------------------------
+
+class TestInteractiveFillOptionalArgs:
+    def test_sets_max_wall_parallel_span_from_input(self):
+        args = _make_args(opening_width=72.0, opening_height=36.0, projection_depth=16.0)
+        # first prompt = max_wall_parallel_span, second = max_wall_overlap (skip)
+        with patch("builtins.input", side_effect=["120.0", ""]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert args.max_wall_parallel_span == pytest.approx(120.0)
+
+    def test_sets_max_wall_overlap_from_input(self):
+        args = _make_args(opening_width=72.0, opening_height=36.0, projection_depth=16.0)
+        # first prompt = max_wall_parallel_span (skip), second = max_wall_overlap
+        with patch("builtins.input", side_effect=["", "8.0"]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert args.max_wall_overlap == pytest.approx(8.0)
+
+    def test_skips_when_non_tty(self):
+        args = _make_args()
+        with patch("builtins.input", side_effect=AssertionError("input() should not be called")):
+            with patch.object(sys.stdin, "isatty", return_value=False):
+                interactive_fill_optional_args(args)  # must not raise or call input
+
+    def test_does_not_overwrite_already_set_field(self):
+        args = _make_args(opening_width=72.0, opening_height=36.0,
+                          projection_depth=16.0, max_wall_parallel_span=100.0)
+        # Only one prompt should appear (for max_wall_overlap); skip it
+        with patch("builtins.input", return_value=""):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert args.max_wall_parallel_span == pytest.approx(100.0)
+
+    def test_both_fields_skipped_leaves_none(self):
+        args = _make_args()
+        with patch("builtins.input", side_effect=["", ""]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert args.max_wall_parallel_span is None
+        assert args.max_wall_overlap is None
+
+
+# ---------------------------------------------------------------------------
+# _stamp_path – unit tests
+# ---------------------------------------------------------------------------
+
+class TestStampPath:
+    def test_stem_contains_original_stem(self):
+        p = Path("output_svgs/results.json")
+        stamped = _stamp_path(p)
+        assert stamped.stem.startswith("results_")
+
+    def test_suffix_preserved(self):
+        p = Path("output_svgs/results.json")
+        assert _stamp_path(p).suffix == ".json"
+
+    def test_parent_preserved(self):
+        p = Path("output_svgs/results.json")
+        assert _stamp_path(p).parent == Path("output_svgs")
+
+    def test_stamp_format_is_digits(self):
+        import re
+        p = Path("results.json")
+        stamped = _stamp_path(p)
+        # Stem should be "results_YYYYMMDD_HHMMSS"
+        assert re.match(r"results_\d{8}_\d{6}$", stamped.stem)
+
+    def test_two_calls_differ_or_are_equal(self):
+        # Two stamps taken in rapid succession may be equal (same second) but must
+        # share the same prefix pattern — they must not crash.
+        p = Path("results.json")
+        s1 = _stamp_path(p)
+        s2 = _stamp_path(p)
+        assert s1.suffix == s2.suffix == ".json"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import datetime
 import json
 import math
 import sys
@@ -62,6 +63,8 @@ class BayConstraints:
     :param frame_body_depth: Depth of the window frame body in inches. Used for SVG plan rendering.
     :param max_wall_overlap: Maximum allowed per-side overhang of the bay beyond the masonry opening
         in inches. ``None`` means no limit is enforced.
+    :param max_wall_parallel_span: Maximum allowed total wall-parallel span of the bay in inches
+        (i.e. how wide the framing appears from outside). ``None`` means no limit is enforced.
     """
 
     opening_width: float
@@ -80,6 +83,7 @@ class BayConstraints:
     sill_height: float | None = None
     frame_body_depth: float = 4.0
     max_wall_overlap: float | None = None
+    max_wall_parallel_span: float | None = None
 
 
 @dataclass(frozen=True)
@@ -485,6 +489,12 @@ def find_candidates(
                 ):
                     continue
 
+                if (
+                    constraints.max_wall_parallel_span is not None
+                    and wall_parallel_span > constraints.max_wall_parallel_span
+                ):
+                    continue
+
                 score = score_candidate(
                     side_window=side_window,
                     center_window=center_window,
@@ -589,6 +599,15 @@ def verify_candidate(
         raise ValueError(
             f"Wall overlap of {wall_overlap:.2f}\" per side exceeds the maximum allowed "
             f"{constraints.max_wall_overlap:.2f}\" per side."
+        )
+
+    if (
+        constraints.max_wall_parallel_span is not None
+        and wall_parallel_span > constraints.max_wall_parallel_span
+    ):
+        raise ValueError(
+            f"Wall-parallel span of {wall_parallel_span:.2f}\" exceeds the maximum allowed "
+            f"{constraints.max_wall_parallel_span:.2f}\"."
         )
 
     score = score_candidate(
@@ -922,6 +941,7 @@ def candidate_to_dict(
             "min_unit_width": constraints.min_unit_width,
             "max_single_unit_width": constraints.max_single_unit_width,
             "max_wall_overlap": constraints.max_wall_overlap,
+            "max_wall_parallel_span": constraints.max_wall_parallel_span,
         }
     return data
 
@@ -1039,7 +1059,32 @@ def prompt_for_value(
         return value
 
 
-def interactive_fill_args(args: argparse.Namespace) -> None:
+def prompt_optional_float(prompt: str, hint: str = "") -> float | None:
+    """Prompt for an optional float value; return ``None`` if the user presses Enter.
+
+    Invalid input prints a warning and is treated as a skip (returns ``None``).
+
+    :param prompt: Human-readable label shown before the bracket hint.
+    :param hint: Optional short note appended in parentheses to the prompt.
+    :return: A float value, or ``None`` if the user skipped.
+    """
+
+    display = prompt
+    if hint:
+        display += f" ({hint})"
+    display += " [Enter to skip]: "
+
+    raw = input(display).strip()
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except ValueError:
+        print(f"  Invalid input '{raw}', skipping.", file=sys.stderr)
+        return None
+
+
+def interactive_fill_args(args: argparse.Namespace) -> bool:
     """Prompt interactively for any required CLI argument that was not supplied.
 
     Required fields that are still ``None`` after argparse are filled in-place.
@@ -1048,6 +1093,7 @@ def interactive_fill_args(args: argparse.Namespace) -> None:
 
     :param args: Parsed argparse namespace; missing required fields are filled in-place.
     :raises SystemExit: When stdin is not a tty but required fields are missing.
+    :return: ``True`` if any field was prompted for interactively, ``False`` otherwise.
     """
 
     _pos = lambda v: "Must be > 0." if v <= 0 else None
@@ -1070,7 +1116,7 @@ def interactive_fill_args(args: argparse.Namespace) -> None:
 
     missing = [name for name, *_ in fields_to_check if getattr(args, name, None) is None]
     if not missing:
-        return
+        return False
 
     if not sys.stdin.isatty():
         raise SystemExit(
@@ -1087,6 +1133,35 @@ def interactive_fill_args(args: argparse.Namespace) -> None:
             setattr(args, attr, prompt_for_value(prompt + " in inches", type_fn, validator=validator))
 
     print()
+    return True
+
+
+def interactive_fill_optional_args(args: argparse.Namespace) -> None:
+    """Prompt for optional constraint fields when running interactively.
+
+    Each field is presented with an Enter-to-skip option.
+    Does nothing when stdin is not a tty.
+
+    :param args: Parsed argparse namespace; optional fields are filled in-place.
+    """
+
+    if not sys.stdin.isatty():
+        return
+
+    print("Optional limits — press Enter to skip each:")
+    optional_fields = [
+        ("max_wall_parallel_span", "Maximum outside span along the wall"),
+        ("max_wall_overlap",       "Maximum wall overlap per side beyond opening"),
+    ]
+    any_set = False
+    for attr, prompt in optional_fields:
+        if getattr(args, attr, None) is None:
+            val = prompt_optional_float(f"  {prompt}", hint="inches")
+            if val is not None:
+                setattr(args, attr, val)
+                any_set = True
+    if any_set:
+        print()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1183,6 +1258,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     common.add_argument(
+        "--max-wall-span",
+        type=float,
+        default=None,
+        dest="max_wall_parallel_span",
+        help=(
+            "Maximum allowed outside wall-parallel span of the framing in inches. "
+            "Default: no limit."
+        ),
+    )
+    common.add_argument(
         "--stock-json",
         type=Path,
         help="Optional JSON file containing stock window definitions.",
@@ -1249,6 +1334,7 @@ def build_constraints_from_args(args: argparse.Namespace) -> BayConstraints:
         sill_height=args.sill_height,
         frame_body_depth=args.frame_body_depth,
         max_wall_overlap=args.max_wall_overlap,
+        max_wall_parallel_span=args.max_wall_parallel_span,
     )
 
 
@@ -1287,6 +1373,15 @@ def _prompt_for_subcommand() -> str:
         print("  Please enter 'search' or 'verify'.", file=sys.stderr)
 
 
+def _stamp_path(path: Path) -> Path:
+    """Return a copy of *path* with a datetime stamp inserted before the suffix.
+
+    ``results.json`` → ``results_20260408_143022.json``
+    """
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    return path.with_name(f"{path.stem}_{ts}{path.suffix}")
+
+
 def main() -> None:
     """Run the bay window calculator CLI."""
 
@@ -1295,7 +1390,9 @@ def main() -> None:
         sys.argv.insert(1, _prompt_for_subcommand())
 
     args = parse_args()
-    interactive_fill_args(args)
+    went_interactive = interactive_fill_args(args)
+    if went_interactive:
+        interactive_fill_optional_args(args)
     constraints = build_constraints_from_args(args)
     stock_windows = build_stock_windows(args)
 
@@ -1308,8 +1405,9 @@ def main() -> None:
             frame_body_depth=constraints.frame_body_depth,
         )
         if args.json_output:
-            write_candidates_json(candidates[:args.limit], args.json_output, constraints=constraints)
-            print(f"JSON written to: {args.json_output}")
+            out_path = _stamp_path(Path(args.json_output))
+            write_candidates_json(candidates[:args.limit], out_path, constraints=constraints)
+            print(f"JSON written to: {out_path}")
         return
 
     if args.command == "verify":
@@ -1325,8 +1423,9 @@ def main() -> None:
             write_svg_file(candidate, args.svg_output, frame_body_depth=constraints.frame_body_depth)
             print(f"SVG written to: {args.svg_output}")
         if args.json_output:
-            write_candidate_json(candidate, args.json_output, constraints=constraints)
-            print(f"JSON written to: {args.json_output}")
+            out_path = _stamp_path(Path(args.json_output))
+            write_candidate_json(candidate, out_path, constraints=constraints)
+            print(f"JSON written to: {out_path}")
         return
 
     raise ValueError(f"Unsupported command: {args.command}")
