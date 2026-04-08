@@ -1361,6 +1361,12 @@ def interactive_fill_optional_args(args: argparse.Namespace) -> None:
     if any_set:
         print()
 
+    # Prompt for JSON output path if not already set (search command only).
+    if getattr(args, "command", None) == "search" and getattr(args, "json_output", None) is None:
+        raw = input("  JSON output file [results.json, Enter for default]: ").strip()
+        args.json_output = Path(raw) if raw else Path("results.json")
+        print()
+
 
 def parse_args() -> argparse.Namespace:
     """Parse command-line arguments."""

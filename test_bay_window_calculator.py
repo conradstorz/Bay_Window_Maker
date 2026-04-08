@@ -2167,16 +2167,16 @@ class TestInteractiveFillArgsReturnsBool:
 class TestInteractiveFillOptionalArgs:
     def test_sets_max_wall_parallel_span_from_input(self):
         args = _make_args(opening_width=72.0, opening_height=36.0, projection_depth=16.0)
-        # first prompt = max_wall_parallel_span, second = max_wall_overlap (skip)
-        with patch("builtins.input", side_effect=["120.0", ""]):
+        # prompts: max_wall_parallel_span, max_wall_overlap (skip), json output (skip→default)
+        with patch("builtins.input", side_effect=["120.0", "", ""]):
             with patch.object(sys.stdin, "isatty", return_value=True):
                 interactive_fill_optional_args(args)
         assert args.max_wall_parallel_span == pytest.approx(120.0)
 
     def test_sets_max_wall_overlap_from_input(self):
         args = _make_args(opening_width=72.0, opening_height=36.0, projection_depth=16.0)
-        # first prompt = max_wall_parallel_span (skip), second = max_wall_overlap
-        with patch("builtins.input", side_effect=["", "8.0"]):
+        # prompts: max_wall_parallel_span (skip), max_wall_overlap, json output (skip→default)
+        with patch("builtins.input", side_effect=["", "8.0", ""]):
             with patch.object(sys.stdin, "isatty", return_value=True):
                 interactive_fill_optional_args(args)
         assert args.max_wall_overlap == pytest.approx(8.0)
@@ -2198,11 +2198,43 @@ class TestInteractiveFillOptionalArgs:
 
     def test_both_fields_skipped_leaves_none(self):
         args = _make_args()
-        with patch("builtins.input", side_effect=["", ""]):
+        # prompts: max_wall_parallel_span (skip), max_wall_overlap (skip), json output (skip→default)
+        with patch("builtins.input", side_effect=["", "", ""]):
             with patch.object(sys.stdin, "isatty", return_value=True):
                 interactive_fill_optional_args(args)
         assert args.max_wall_parallel_span is None
         assert args.max_wall_overlap is None
+
+    def test_json_output_set_to_default_when_enter_pressed(self):
+        args = _make_args()
+        with patch("builtins.input", side_effect=["", "", ""]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert args.json_output == Path("results.json")
+
+    def test_json_output_set_to_entered_path(self):
+        args = _make_args()
+        with patch("builtins.input", side_effect=["", "", "output_svgs/my_results.json"]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert args.json_output == Path("output_svgs/my_results.json")
+
+    def test_json_output_not_prompted_when_already_set(self):
+        args = _make_args()
+        args.json_output = Path("existing.json")
+        # only two prompts for the numeric optional fields
+        with patch("builtins.input", side_effect=["", ""]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert args.json_output == Path("existing.json")
+
+    def test_json_output_not_prompted_for_verify_command(self):
+        args = _make_args(command="verify")
+        # only two prompts; a third would raise StopIteration
+        with patch("builtins.input", side_effect=["", ""]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                interactive_fill_optional_args(args)
+        assert getattr(args, "json_output", None) is None
 
 
 # ---------------------------------------------------------------------------
