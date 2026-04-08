@@ -582,9 +582,8 @@ def diagnose_constraints(
             f"\n  [Usability] None of the height-matched windows pass the width usability check "
             f"(allowed range: {constraints.min_unit_width}\" – {constraints.max_single_unit_width}\")."
         )
-        lines.append(
-            f"  Heights-matched window widths: {', '.join(f'{w}\"' for w in widths)}"
-        )
+        widths_str = ", ".join(f'{w}"' for w in widths)
+        lines.append(f"  Heights-matched window widths: {widths_str}")
         lines.append(
             f"  Suggestions:\n"
             f"    --min-unit-width {min(widths):.0f}    (lower the minimum width)\n"
