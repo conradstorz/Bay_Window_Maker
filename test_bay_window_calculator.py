@@ -17,6 +17,7 @@ from bay_window_calculator_with_svg import (
     FaceDimensions,
     WindowUnit,
     _face_rectangle,
+    _prompt_for_subcommand,
     _rotate_point,
     _translate_points,
     build_default_stock_windows,
@@ -1948,3 +1949,55 @@ class TestInteractiveFillArgs:
             with patch.object(sys.stdin, "isatty", return_value=True):
                 interactive_fill_args(args)
         assert args.opening_width == pytest.approx(72.0)
+
+
+# ---------------------------------------------------------------------------
+# _prompt_for_subcommand – unit tests
+# ---------------------------------------------------------------------------
+
+class TestPromptForSubcommand:
+    def test_returns_search_for_word_search(self):
+        with patch("builtins.input", return_value="search"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "search"
+
+    def test_returns_search_for_s(self):
+        with patch("builtins.input", return_value="s"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "search"
+
+    def test_returns_search_for_1(self):
+        with patch("builtins.input", return_value="1"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "search"
+
+    def test_returns_verify_for_word_verify(self):
+        with patch("builtins.input", return_value="verify"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "verify"
+
+    def test_returns_verify_for_v(self):
+        with patch("builtins.input", return_value="v"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "verify"
+
+    def test_returns_verify_for_2(self):
+        with patch("builtins.input", return_value="2"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "verify"
+
+    def test_retries_on_invalid_input(self):
+        with patch("builtins.input", side_effect=["bad", "nope", "search"]):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "search"
+
+    def test_non_tty_raises_system_exit(self):
+        with patch.object(sys.stdin, "isatty", return_value=False):
+            with pytest.raises(SystemExit) as exc_info:
+                _prompt_for_subcommand()
+        assert "search" in str(exc_info.value).lower()
+
+    def test_input_is_case_insensitive(self):
+        with patch("builtins.input", return_value="SEARCH"):
+            with patch.object(sys.stdin, "isatty", return_value=True):
+                assert _prompt_for_subcommand() == "search"

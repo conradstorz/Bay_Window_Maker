@@ -1260,8 +1260,39 @@ def build_stock_windows(args: argparse.Namespace) -> list[WindowUnit]:
     return build_default_stock_windows(height=args.opening_height)
 
 
+def _prompt_for_subcommand() -> str:
+    """Prompt the user to choose a subcommand when none was given on the CLI.
+
+    :return: One of ``"search"`` or ``"verify"``.
+    :raises SystemExit: When stdin is not a terminal.
+    """
+
+    if not sys.stdin.isatty():
+        raise SystemExit(
+            "Error: a subcommand is required.\n"
+            "  Usage: bay_window_calculator_with_svg.py search --opening-width ...\n"
+            "         bay_window_calculator_with_svg.py verify --opening-width ..."
+        )
+
+    print("Bay Window Calculator")
+    print("Choose a mode:")
+    print("  1. search  — find all valid layout candidates")
+    print("  2. verify  — check one specific layout")
+    while True:
+        raw = input("Mode [search/verify]: ").strip().lower()
+        if raw in ("search", "s", "1"):
+            return "search"
+        if raw in ("verify", "v", "2"):
+            return "verify"
+        print("  Please enter 'search' or 'verify'.", file=sys.stderr)
+
+
 def main() -> None:
     """Run the bay window calculator CLI."""
+
+    known_commands = {"search", "verify"}
+    if not any(tok in known_commands for tok in sys.argv[1:]):
+        sys.argv.insert(1, _prompt_for_subcommand())
 
     args = parse_args()
     interactive_fill_args(args)
